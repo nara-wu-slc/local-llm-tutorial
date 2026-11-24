@@ -1,0 +1,13 @@
+# 基本（transformers バックエンド）
+# torch は研究室の CUDA に合わせて別途インストールする（README 参照）
+transformers>=4.51
+accelerate
+huggingface-hub
+jinja2
+packaging
+
+# 任意:
+#   vLLM バックエンド       … pip install vllm
+#   llama.cpp バックエンド  … pip install llama-cpp-python（README 参照）
+#   --quantize 4bit/8bit   … pip install bitsandbytes
+#   テスト                  … pip install pytest

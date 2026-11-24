@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+tiny_models/
+smoke_test_result*.md
+*.jsonl
