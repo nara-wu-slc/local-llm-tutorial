@@ -34,7 +34,8 @@ chat.py / generate.py / 自分のプログラム
      │    llmjp.py  gpt_oss.py  swallow.py  qwen.py  sarashina.py  nvidia.py  base.py(汎用)
      ├─ バックエンド（推論エンジン）        slcllm/backends/
      │    hf（transformers, 既定） / vllm / llamacpp（GGUF） / dryrun（プロンプト確認用）
-     └─ モデルの取得（キャッシュ確認・不足分の取得）  slcllm/hub.py, download.py
+     ├─ モデルの取得（キャッシュ確認・不足分の取得）  slcllm/hub.py, download.py
+     └─ GPU メモリの見積もり                        slcllm/memory.py, estimate_memory.py
 ```
 
 アダプタが担当していること:
@@ -155,6 +156,49 @@ python3 download.py --smoke-test
 * 利用規約への同意が必要なモデル（gated model）は、モデルのページで同意したうえで `hf auth login`（古い版では `huggingface-cli login`）でログインしてください。
 * 研究で使うモデルの版を固定したいときは `--revision`（コミット ID やタグ）を指定します。
 * 不要になったモデルは `hf cache delete`（古い版では `huggingface-cli delete-cache`）で削除できます。
+
+### 必要な GPU メモリの見積もり（`estimate_memory.py`）
+
+モデルを動かす前に、必要な GPU メモリの目安を確認できます。重みはダウンロードせず、`config.json` など数十 KB のファイルだけを使います。
+GPU があれば（`nvidia-smi` で調べた）空き容量と比べて、載るかどうかも表示します。
+
+```bash
+python3 estimate_memory.py -m Qwen/Qwen3-8B openai/gpt-oss-20b
+python3 estimate_memory.py -m Qwen/Qwen3-8B --context 32768        # 長い会話を想定
+python3 estimate_memory.py -m Qwen/Qwen3-32B --gpu-gb 24 --gpu-gb 24  # 別のマシン（24GB×2枚）を想定
+python3 estimate_memory.py --smoke-test                             # smoke test で使うモデル一式
+```
+
+出力例（Qwen3-8B と同じ寸法の設定で、24 GiB の GPU 2 枚を想定）:
+
+```text
+■ Qwen/Qwen3-8B
+  パラメータ数 8.19B（Qwen3ForCausalLM）
+  KV キャッシュ 144 KiB/トークン: 4K→0.6 GiB / 32K→4.5 GiB / 40K→5.6 GiB
+
+                                    重み  KV(32,768)   その他      合計
+  transformers（bf16）          15.3 GiB     4.5 GiB  1.6 GiB  21.3 GiB  ✅ GPU0 に載る
+  transformers --quantize 4bit   5.7 GiB     4.5 GiB  1.1 GiB  11.3 GiB  ✅ GPU0 に載る
+  transformers --quantize 8bit   8.9 GiB     4.5 GiB  1.2 GiB  14.7 GiB  ✅ GPU0 に載る
+  vLLM（max-model-len 40,960）  15.3 GiB     5.6 GiB  1.5 GiB  22.4 GiB  ⚠️ -tp 2（2枚に分割）なら動く
+  llama.cpp（GGUF Q4_K_M）       4.6 GiB     4.5 GiB  0.3 GiB   9.4 GiB  ✅ GPU0 に載る  ※パラメータ数からの推定
+```
+
+見積もりの方法:
+
+| 項目 | 求め方 |
+|---|---|
+| 重み | config から中身の無い（meta デバイス上の）モデルを組み立ててパラメータ数を数え、× 2 バイト（bf16）。量子化済みのリポジトリ（MXFP4・AWQ・FP8 など）は Hub 上のファイルサイズ |
+| `--quantize 4bit/8bit` | `nn.Linear` の重みだけが量子化される（bitsandbytes の仕様）として計算 |
+| KV キャッシュ | 2(K,V) × 注意機構の層数 × KV ヘッド数 × ヘッド次元 × 2 バイト × トークン数。スライディングウィンドウ層は窓の長さで頭打ち、Mamba / 線形注意の層は KV キャッシュなし |
+| GGUF | Hub 上の実ファイルサイズ（取得できなければパラメータ数 × 量子化のビット数からの推定） |
+| その他 | CUDA の初期化や計算途中の値など。目安として 0.8 GiB + 重みの 5%（vLLM は 1.5 GiB） |
+
+* **あくまで目安**です。ライブラリの版、入力の長さ、バッチの大きさで数 GiB 程度前後します。ぎりぎりのときは余裕を見てください。
+* **MoE モデル**（Qwen3-30B-A3B、gpt-oss など）は、1トークンの計算に使うのが一部の専門家でも、**すべての専門家の重みを GPU に載せる**必要があります。
+  また専門家の重みは `nn.Linear` ではないことが多く、`--quantize 4bit` ではほとんど小さくなりません（GGUF 版を使うのが有効です）。
+* **gpt-oss** は MXFP4 のまま載れば 20b で約 13 GiB ですが、`kernels` / `triton` が無い・GPU が対応していない場合は bf16 に展開されて約 40 GiB になります。両方の行を表示します。
+* **vLLM** は既定でモデルの最大長（Qwen3.5 なら 262,144 トークンなど）分の KV キャッシュを確保しようとするため、載らないときは `--max-model-len` で短くしてください。
 
 ---
 
@@ -372,7 +416,7 @@ class MyModelAdapter(BaseAdapter):
 
 * **`Unrecognized configuration class` / `model type ... not recognized`**: transformers が古い可能性があります（`pip3 install -U transformers`）。
 * **カスタムコードの実行について**: 標準の transformers で読めないモデルは、自動的に `trust_remote_code=True`（リポジトリ内の Python コードを実行）で読み直します。その際はメッセージが表示されます。止めたい場合は `--trust-remote-code no`。
-* **GPU メモリが足りない**: `--quantize 4bit`、GGUF 版（`-b llamacpp -q Q4_K_M -ngl 20`）、より小さいモデル、の順に試してください。
+* **GPU メモリが足りない**: まず `estimate_memory.py` で必要量を確認し、`--quantize 4bit`、GGUF 版（`-b llamacpp -q Q4_K_M -ngl 20`）、より小さいモデル、の順に試してください。
 * **思考が長すぎて回答が出ない**: `--max-tokens 8192` のように増やすか、`--no-think` / `--reasoning-effort low` を使ってください。思考の途中で上限に達した場合はその旨が表示されます。
 * **Nemotron Nano v2 / Nemotron 3 を vLLM で使う**: 精度のため `mamba_ssm_cache_dtype=float32` を自動で指定しています。
 * **Qwen3.5 / 3.8** は画像も扱えるモデルですが、本チュートリアルではテキストのみで使います。
@@ -390,6 +434,8 @@ python3 tools/smoke_test.py           # 実モデルを各系列1つずつ動か
 
 * `tests/test_hub.py` は、本物と同じ構造の偽キャッシュを一時ディレクトリに作り、Hub への問い合わせとダウンロードだけを
   偽物に差し替えて、キャッシュ確認・不足分の取得・GGUF の選択などを確認します（ネットワーク不要）。
+* `tests/test_memory.py` は、Qwen3-8B・gpt-oss-20b と同じ寸法の config をその場で作り、パラメータ数（公称値との一致）と
+  KV キャッシュの計算を確認します。
 
 * `tests/` はランダムな重みの極小モデルと、各モデルの chat template を模したテンプレートを使って、
   アダプタの選択・思考モード切替・出力解析・ストリーミング表示・各バックエンドの受け渡しを確認します。
