@@ -22,6 +22,7 @@ except ImportError:
     pass
 
 from slcllm.cli import add_common_args, build_llm, handle_list_options
+from slcllm.hub import DownloadError
 from slcllm.ui import StreamPrinter, print_stats
 
 
@@ -95,5 +96,8 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except DownloadError as e:  # モデルが未取得・取得できない等は、トレースバックなしで理由だけ表示
+        print(f"エラー: {e}", file=sys.stderr)
+        sys.exit(1)
     except (KeyboardInterrupt, EOFError):
         sys.exit(1)

@@ -4,6 +4,7 @@
   * 元モデルの ID（例: llm-jp/llm-jp-4.1-8b-thinking）+ --quant Q4_K_M
       → "<ID>-gguf" / "<ID>-GGUF" などのリポジトリから該当する量子化ファイルを探して取得
   * GGUF リポジトリの ID（例: Qwen/Qwen3-8B-GGUF）+ --quant Q4_K_M
+  （どちらもキャッシュ済みならそれを使い、無ければ必要なファイルだけ取得する）
   * ローカルの .gguf ファイルのパス
 chat template は GGUF に埋め込まれたものを使う（--tokenizer で元モデルの tokenizer を使うことも可能）.
 """
@@ -17,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from ..templates import render_chat_template
 from ..types import GenerationParams, RawGeneration
-from .base import Backend, TextCallback, hf_render, load_hf_tokenizer, log, tokenizer_chat_template
+from .base import Backend, TextCallback, hf_render, load_hf_tokenizer, tokenizer_chat_template
 
 # 終了判定の予備（llama_vocab_is_eog が使えない古い llama-cpp-python 用）.
 # harmony 形式の <|end|> は「思考の終わり」で生成の終わりではないので含めない.
@@ -27,50 +28,29 @@ _COMMON_STOP_PIECES = {
 }
 
 
-def resolve_gguf(model_id: str, quant: str, adapter: Any, gguf_file: Optional[str] = None) -> str:
+def resolve_gguf(model_id: str, quant: Optional[str], adapter: Any, gguf_file: Optional[str] = None,
+                 mode: str = "auto") -> str:
+    """GGUF ファイルのローカルパスを返す. キャッシュに無ければ Hub から取得する（slcllm/hub.py）."""
     if os.path.isfile(model_id) and model_id.endswith(".gguf"):
         return model_id
     if gguf_file and os.path.isfile(gguf_file):
         return gguf_file
-    from huggingface_hub import hf_hub_download, list_repo_files
+    from ..hub import ensure_gguf
 
     repos = [model_id] if re.search(r"gguf", model_id, re.I) else adapter.gguf_repos(model_id)
-    tried = []
-    for repo in repos:
-        try:
-            files = list_repo_files(repo)
-        except Exception:
-            tried.append(repo)
-            continue
-        ggufs = sorted(f for f in files if f.endswith(".gguf") and "mmproj" not in f.lower())
-        if gguf_file:
-            cands = [f for f in ggufs if os.path.basename(f) == gguf_file]
-        else:
-            cands = [f for f in ggufs if quant.lower() in os.path.basename(f).lower()]
-            if not cands and len(ggufs) == 1:
-                log(f"{quant} が見つからないため唯一の GGUF ファイル {ggufs[0]} を使います")
-                cands = ggufs
-        if not cands:
-            raise FileNotFoundError(f"{repo} に {gguf_file or quant} の GGUF がありません. 候補: {ggufs}")
-        first = cands[0]
-        m = re.match(r"(.*)-(\d{5})-of-(\d{5})\.gguf$", first)  # 分割ファイル
-        parts = [f for f in cands if m and f.startswith(m.group(1))] if m else [first]
-        log(f"GGUF を取得します: {repo} / {', '.join(parts)}")
-        paths = [hf_hub_download(repo, f) for f in parts]
-        return paths[0]
-    raise FileNotFoundError(f"GGUF リポジトリが見つかりません（試したもの: {tried}）. --gguf-file でパスを指定してください")
+    return ensure_gguf(repos, quant, gguf_file, mode=mode)
 
 
 class LlamaCppBackend(Backend):
     name = "llamacpp"
 
-    def __init__(self, model_id: str, adapter: Any, *, quant: str = "Q4_K_M", gguf_file: Optional[str] = None,
+    def __init__(self, model_id: str, adapter: Any, *, quant: Optional[str] = None, gguf_file: Optional[str] = None,
                  n_gpu_layers: int = -1, ctx_size: int = 8192, tokenizer: Optional[str] = None,
-                 debug: bool = False, **_: Any):
+                 download: str = "auto", debug: bool = False, **_: Any):
         from llama_cpp import Llama
 
         self.adapter = adapter
-        path = resolve_gguf(model_id, quant, adapter, gguf_file)
+        path = resolve_gguf(model_id, quant, adapter, gguf_file, mode=download)
         self.llm = Llama(model_path=path, n_gpu_layers=n_gpu_layers, n_ctx=ctx_size, verbose=debug)
         meta: Dict[str, Any] = getattr(self.llm, "metadata", {}) or {}
         self._eos = self.llm.token_eos()
@@ -80,7 +60,10 @@ class LlamaCppBackend(Backend):
         self._add_bos_default = meta.get("tokenizer.ggml.add_bos_token", "true") == "true"
         self.hf_tokenizer = None
         if tokenizer:  # 元モデルの tokenizer の chat template を使う
-            self.hf_tokenizer, _ = load_hf_tokenizer(tokenizer, adapter.trust_remote_code, adapter.tokenizer_kwargs)
+            from ..hub import ensure_model
+
+            tok_path = ensure_model(tokenizer, mode=download, need_weights=False)
+            self.hf_tokenizer, _ = load_hf_tokenizer(tok_path, adapter.trust_remote_code, adapter.tokenizer_kwargs)
             self.chat_template = tokenizer_chat_template(self.hf_tokenizer)
         else:
             self.chat_template = meta.get("tokenizer.chat_template")

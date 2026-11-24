@@ -76,7 +76,10 @@ class BaseAdapter:
     max_new_tokens = 1024
     max_new_tokens_thinking = 4096
 
-    # --- GGUF (llama.cpp) 用 ---
+    # --- モデルの取得 ---
+    # 既定（slcllm/hub.py の DEFAULT_IGNORE_PATTERNS）に加えて取得しないファイル
+    download_ignore_patterns: Sequence[str] = ()
+    # GGUF (llama.cpp) の取得元. {元モデル ID: GGUF リポジトリ ID}
     gguf_repo_map: Dict[str, str] = {}
 
     # ------------------------------------------------------------------

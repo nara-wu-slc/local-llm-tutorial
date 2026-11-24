@@ -166,32 +166,16 @@ def test_llamacpp_backend(fake_llamacpp):
     assert r.prompt.startswith("<|im_start|>system\n")
 
 
-def test_resolve_gguf(monkeypatch):
-    import huggingface_hub
-
+def test_resolve_gguf_repo_candidates(monkeypatch):
+    """元モデル ID から GGUF リポジトリの候補を作る（取得そのものは tests/test_hub.py で確認）."""
+    from slcllm import hub
     from slcllm.adapters import get_adapter_class
     from slcllm.backends.llamacpp import resolve_gguf
 
-    files = {
-        "llm-jp/llm-jp-4.1-8b-thinking-gguf": ["llm-jp-4.1-8b-thinking-Q4_K_M.gguf", "llm-jp-4.1-8b-thinking-Q8_0.gguf"],
-        "ggml-org/gpt-oss-20b-GGUF": ["gpt-oss-20b-mxfp4.gguf"],
-        "Qwen/Qwen3-32B-GGUF": ["Qwen3-32B-Q8_0-00001-of-00002.gguf", "Qwen3-32B-Q8_0-00002-of-00002.gguf"],
-    }
-
-    def list_repo_files(repo):
-        if repo not in files:
-            raise FileNotFoundError(repo)
-        return files[repo]
-
-    downloaded = []
-    monkeypatch.setattr(huggingface_hub, "list_repo_files", list_repo_files)
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda r, f: downloaded.append(f) or f"/cache/{f}")
-
-    mid = "llm-jp/llm-jp-4.1-8b-thinking"
-    assert resolve_gguf(mid, "Q8_0", get_adapter_class(mid)(mid)) == "/cache/llm-jp-4.1-8b-thinking-Q8_0.gguf"
-    mid = "openai/gpt-oss-20b"
-    assert resolve_gguf(mid, "Q4_K_M", get_adapter_class(mid)(mid)).endswith("mxfp4.gguf")
-    mid = "Qwen/Qwen3-32B"
-    downloaded.clear()
-    assert resolve_gguf(mid, "Q8_0", get_adapter_class(mid)(mid)).endswith("00001-of-00002.gguf")
-    assert len(downloaded) == 2  # 分割ファイルはすべて取得する
+    calls = []
+    monkeypatch.setattr(hub, "ensure_gguf", lambda repos, quant, f, mode: calls.append((list(repos), quant, mode)) or "x")
+    for mid in ("openai/gpt-oss-20b", "llm-jp/llm-jp-4.1-8b-thinking", "llm-jp/llm-jp-4.1-8b-thinking-gguf"):
+        resolve_gguf(mid, None, get_adapter_class(mid)(mid), mode="offline")
+    assert calls[0][0][0] == "ggml-org/gpt-oss-20b-GGUF"
+    assert "llm-jp/llm-jp-4.1-8b-thinking-gguf" in calls[1][0]
+    assert calls[2][0] == ["llm-jp/llm-jp-4.1-8b-thinking-gguf"] and calls[2][2] == "offline"

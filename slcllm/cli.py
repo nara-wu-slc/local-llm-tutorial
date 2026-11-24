@@ -15,6 +15,10 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("-b", "--backend", default="hf", choices=["hf", "vllm", "llamacpp", "dryrun"],
                    help="推論バックエンド（既定: hf = transformers. dryrun はプロンプト確認用）")
     g.add_argument("--adapter", help="アダプタを手動で指定（通常はモデル名から自動選択）")
+    g.add_argument("--download", default="auto", choices=["auto", "offline", "update"],
+                   help="モデルの取得方法. auto: キャッシュになければ取得（既定）/ offline: キャッシュのみ使う / "
+                        "update: 新しい版があれば取得")
+    g.add_argument("--revision", help="モデルの版（ブランチ名・タグ・コミット ID）を固定する")
     g.add_argument("--list-models", action="store_true", help="登録済みモデルの一覧を表示して終了")
     g.add_argument("--list-adapters", action="store_true", help="アダプタの一覧を表示して終了")
 
@@ -51,7 +55,7 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--gpu-memory-utilization", type=float, default=0.9)
 
     g = p.add_argument_group("llama.cpp バックエンド（GGUF）")
-    g.add_argument("-q", "--quant", default="Q4_K_M", help="量子化の種類（既定: Q4_K_M）")
+    g.add_argument("-q", "--quant", help="量子化の種類（既定: Q4_K_M. 無ければリポジトリ内の唯一の GGUF）")
     g.add_argument("--gguf-file", help="GGUF ファイル名またはローカルパス")
     g.add_argument("-ngl", "--n-gpu-layers", type=int, default=-1, help="GPU に載せる層数（-1 = 全部）")
     g.add_argument("-c", "--ctx-size", type=int, default=8192)
@@ -108,4 +112,5 @@ def build_llm(args: argparse.Namespace):
                               ctx_size=args.ctx_size, tokenizer=args.tokenizer)
     return LocalLLM(args.model, backend=args.backend, adapter=args.adapter, think=args.think,
                     reasoning_effort=args.reasoning_effort, system_prompt=system_prompt,
-                    generation=generation_overrides(args), **backend_kwargs)
+                    generation=generation_overrides(args), download=args.download, revision=args.revision,
+                    **backend_kwargs)

@@ -18,6 +18,7 @@ from .adapters import BaseAdapter, get_adapter_class
 from .backends import create_backend
 from .backends.base import log
 from .catalog import resolve_model_id
+from .hub import ensure_model
 from .types import MODEL_DEFAULT, ChatResponse, GenerationParams, Message
 
 # ライブラリとしての最低限の既定値（モデル・アダプタ・ユーザ指定がなければこれを使う）
@@ -37,6 +38,8 @@ class LocalLLM:
         reasoning_effort: Optional[str] = None,
         system_prompt: Any = MODEL_DEFAULT,
         generation: Optional[Union[Dict[str, Any], GenerationParams]] = None,
+        download: str = "auto",
+        revision: Optional[str] = None,
         verbose: bool = True,
         **backend_kwargs: Any,
     ):
@@ -49,7 +52,16 @@ class LocalLLM:
         self.adapter: BaseAdapter = adapter_cls(self.model_id, think=think, reasoning_effort=reasoning_effort)
         if verbose:
             log(f"model={self.model_id} / backend={backend} / adapter={self.adapter.name}")
-        self.backend = create_backend(backend, self.model_id, self.adapter, **backend_kwargs)
+        # キャッシュ（HF_HOME）を確認し、無ければ必要なファイルだけ取得する（slcllm/hub.py）
+        if backend in ("llamacpp", "llama.cpp", "gguf"):
+            load_from = self.model_id
+            backend_kwargs["download"] = download
+        else:
+            load_from = ensure_model(self.model_id, revision=revision, mode=download,
+                                     need_weights=(backend != "dryrun"),
+                                     extra_ignore=self.adapter.download_ignore_patterns, verbose=verbose)
+        self.model_path = load_from
+        self.backend = create_backend(backend, load_from, self.adapter, **backend_kwargs)
         self.adapter.setup(self.backend.chat_template, self.backend.special_tokens)
         self.system_prompt: Optional[str] = (
             self.adapter.default_system_prompt if system_prompt is MODEL_DEFAULT else system_prompt

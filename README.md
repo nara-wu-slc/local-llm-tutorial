@@ -32,8 +32,9 @@ chat.py / generate.py / 自分のプログラム
    slcllm.LocalLLM
      ├─ アダプタ（モデルごとの違いを吸収）  slcllm/adapters/
      │    llmjp.py  gpt_oss.py  swallow.py  qwen.py  sarashina.py  nvidia.py  base.py(汎用)
-     └─ バックエンド（推論エンジン）        slcllm/backends/
-          hf（transformers, 既定） / vllm / llamacpp（GGUF） / dryrun（プロンプト確認用）
+     ├─ バックエンド（推論エンジン）        slcllm/backends/
+     │    hf（transformers, 既定） / vllm / llamacpp（GGUF） / dryrun（プロンプト確認用）
+     └─ モデルの取得（キャッシュ確認・不足分の取得）  slcllm/hub.py, download.py
 ```
 
 アダプタが担当していること:
@@ -105,6 +106,55 @@ CMAKE_ARGS="-DGGML_CUDA=on" pip3 install llama-cpp-python --no-cache-dir
 # これをしないと自分のホームディレクトリ配下にバカデカいファイルを読み込んでしまって無駄が多い
 source /slc/share/dot.zshrc.slc
 ```
+
+### モデルの取得状況の確認と事前取得（`download.py`）
+
+`chat.py` / `generate.py` は、モデルを読み込む前に**キャッシュ（`HF_HOME`）に必要なファイルがそろっているかを自動で確認**し、
+そろっていればネットワークに接続せずにそれを使い、足りなければ**不足分だけ**を取得します。
+大きなモデルを先にまとめて取得しておきたいときや、どれが取得済みかを知りたいときは `download.py` を使います。
+
+```bash
+# 取得済みか確認だけする（取得はしない. 未取得なら必要な容量も表示）
+python3 download.py -m Qwen/Qwen3-8B openai/gpt-oss-20b --check
+
+# 確認して、無ければ取得する（複数指定可. 短い名前も使える）
+python3 download.py -m Qwen/Qwen3-8B llm-jp-3-1.8b-instruct
+
+# GGUF（llama.cpp 用）の量子化ファイルを取得する
+python3 download.py -m llm-jp/llm-jp-4.1-8b-thinking -b llamacpp -q Q4_K_M
+
+# キャッシュ済みのモデル一覧（サイズ・最終利用日）
+python3 download.py --list
+
+# tools/smoke_test.py で使うモデル一式を取得する
+python3 download.py --smoke-test
+```
+
+```text
+キャッシュの場所: /path/to/cache/hub
+  HF_HOME=/path/to/cache  HF_HUB_CACHE=(未設定)
+
+✅ Qwen/Qwen3-8B  キャッシュ済み: /path/to/cache/hub/models--Qwen--Qwen3-8B/snapshots/...
+❌ openai/gpt-oss-20b  未取得
+     取得が必要: 12 ファイル / 12.8 GB（モデル全体 12.8 GB）
+```
+
+（上の容量などの数値は表示のイメージです）
+
+* **取得するファイルは推論に必要なものだけ**です。gpt-oss の `original/`・`metal/` にある重複した重み、safetensors があるときの `*.bin`、
+  GGUF・ONNX・TensorFlow 用のファイルなどは取得しません（GGUF は `-b llamacpp` のときだけ、指定した量子化のファイルを取得します）。
+* 取得前に空き容量を確認し、足りなければ取得せずに止まります。`HF_HOME` が未設定のときは、ホームディレクトリに保存される旨の注意が出ます。
+* 取得の仕方は `--download` で変えられます（`chat.py` / `generate.py` / `LocalLLM(download=...)` 共通）。
+
+| `--download` | 動作 |
+|---|---|
+| `auto`（既定） | キャッシュに必要なファイルがそろっていればそれを使う（ネットワークに接続しない）。足りなければ不足分を取得 |
+| `offline` | キャッシュにあるものだけを使う。無ければエラー（ネットワークに出られない計算ノード用。`HF_HUB_OFFLINE=1` でも同じ） |
+| `update` | Hub に新しい版があれば取得する（`download.py` では `--update`） |
+
+* 利用規約への同意が必要なモデル（gated model）は、モデルのページで同意したうえで `hf auth login`（古い版では `huggingface-cli login`）でログインしてください。
+* 研究で使うモデルの版を固定したいときは `--revision`（コミット ID やタグ）を指定します。
+* 不要になったモデルは `hf cache delete`（古い版では `huggingface-cli delete-cache`）で削除できます。
 
 ---
 
@@ -258,6 +308,8 @@ llm.chat_batch(["1+1は？", "2+2は？"])                            # まと�
 | `--quantize 4bit` | bitsandbytes で量子化して読み込む（hf） |
 | `-tp`, `--max-model-len`, `--gpu-memory-utilization` | vLLM 用 |
 | `-q`, `--gguf-file`, `-ngl`, `-c`, `--tokenizer` | llama.cpp 用（量子化の種類、ファイル、GPU に載せる層数、コンテキスト長） |
+| `--download auto\|offline\|update` | モデルの取得方法（「モデルの取得状況の確認と事前取得」参照） |
+| `--revision` | モデルの版（ブランチ名・タグ・コミット ID）を固定する |
 | `--adapter` | アダプタを手動で指定 |
 | `-d`, `--debug` | 実際のプロンプト、トークン数、速度、使われた生成パラメータを表示 |
 
@@ -332,10 +384,14 @@ class MyModelAdapter(BaseAdapter):
 ```bash
 pip3 install pytest
 python3 -m pytest tests/              # 極小のダミーモデルで一連の処理を確認（GPU 不要, 数秒）
+python3 download.py --smoke-test      # smoke test で使う実モデルを先に取得しておく
 python3 tools/smoke_test.py           # 実モデルを各系列1つずつ動かして結果を表にまとめる（GPU 必要）
 ```
 
+* `tests/test_hub.py` は、本物と同じ構造の偽キャッシュを一時ディレクトリに作り、Hub への問い合わせとダウンロードだけを
+  偽物に差し替えて、キャッシュ確認・不足分の取得・GGUF の選択などを確認します（ネットワーク不要）。
+
 * `tests/` はランダムな重みの極小モデルと、各モデルの chat template を模したテンプレートを使って、
   アダプタの選択・思考モード切替・出力解析・ストリーミング表示・各バックエンドの受け渡しを確認します。
-  transformers 4.51 と 5.24 で確認しています。
+  transformers 4.51（huggingface_hub 0.36）と transformers 5.24（huggingface_hub 2.4）で確認しています。
 * 新しいモデルやライブラリの版で動作を確認したら、`tools/smoke_test.py` の結果（`smoke_test_result.md`）を残しておくと便利です。

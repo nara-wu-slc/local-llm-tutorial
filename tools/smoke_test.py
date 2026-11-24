@@ -6,6 +6,8 @@
     python3 tools/smoke_test.py                      # 既定の小さめのモデル一式
     python3 tools/smoke_test.py -m Qwen/Qwen3-1.7B openai/gpt-oss-20b
     python3 tools/smoke_test.py -b vllm -o smoke_vllm.md
+
+モデルは事前に `python3 download.py --smoke-test` で取得しておくと、ダウンロード時間が結果に混ざらない.
 """
 
 import argparse
@@ -18,21 +20,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-# (モデル ID, LocalLLM に渡す追加の引数)
-DEFAULT_CASES = [
-    ("llm-jp/llm-jp-3.1-1.8b-instruct4", {}),
-    ("llm-jp/llm-jp-4.1-8b-thinking", {"reasoning_effort": "low"}),
-    ("openai/gpt-oss-20b", {"reasoning_effort": "low"}),
-    ("tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.5", {}),
-    ("tokyotech-llm/Qwen3-Swallow-8B-RL-v0.2", {}),
-    ("tokyotech-llm/GPT-OSS-Swallow-20B-RL-v0.1", {}),
-    ("Qwen/Qwen3-1.7B", {"think": True}),
-    ("Qwen/Qwen3-1.7B", {"think": False}),
-    ("Qwen/Qwen3.5-2B", {}),
-    ("sbintuitions/sarashina2.2-3b-instruct-v0.1", {}),
-    ("nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese", {"think": False}),
-    ("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", {"think": True}),
-]
+from slcllm.catalog import SMOKE_TEST_CASES as DEFAULT_CASES  # noqa: E402
 
 QUESTION = "日本で一番高い山は何ですか？一文で答えてください。"
 
